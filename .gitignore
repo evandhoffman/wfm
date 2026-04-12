@@ -1,0 +1,13 @@
+# Binaries
+wfm
+/dist/
+
+# Go workspace
+/vendor/
+*.test
+*.out
+
+# Editor
+.idea/
+.vscode/
+*.swp
