@@ -14,7 +14,7 @@ import (
 //
 // Detection order:
 //  1. NetworkManager (nmcli) — most common on Ubuntu, Fedora, Debian, etc.
-//  2. iwd (iwctl)            — Arch Linux and minimal systems (TODO)
+//  2. iwd (iwctl)            — Arch Linux, Raspberry Pi OS Lite, minimal systems
 func Detect() (Backend, error) {
 	if nmcliPath, err := exec.LookPath("nmcli"); err == nil {
 		slog.Debug("found nmcli", "path", nmcliPath)
@@ -25,22 +25,30 @@ func Detect() (Backend, error) {
 		slog.Warn("nmcli present but NetworkManager is not running")
 	}
 
-	// TODO: iwd/iwctl backend
-	// if iwctlPath, err := exec.LookPath("iwctl"); err == nil {
-	//     slog.Info("using iwd backend", "iwctl", iwctlPath)
-	//     return &iwdBackend{bin: iwctlPath}, nil
-	// }
+	if iwctlPath, err := exec.LookPath("iwctl"); err == nil {
+		slog.Debug("found iwctl", "path", iwctlPath)
+		if isIWDRunning(iwctlPath) {
+			slog.Info("using iwd backend", "iwctl", iwctlPath)
+			return &iwdBackend{bin: iwctlPath}, nil
+		}
+		slog.Warn("iwctl present but iwd is not running")
+	}
 
 	return nil, errors.New(
 		"no supported WiFi backend found\n" +
-			"  • NetworkManager not running — try: sudo systemctl start NetworkManager\n" +
-			"  • iwd support coming soon",
+			"  • NetworkManager: install or start with: sudo systemctl start NetworkManager\n" +
+			"  • iwd: install or start with: sudo systemctl start iwd",
 	)
 }
 
 // isNMRunning checks that the NetworkManager daemon is reachable by running
 // `nmcli -t general status`, which exits non-zero if NM is not running.
 func isNMRunning(nmcliPath string) bool {
-	err := exec.Command(nmcliPath, "-t", "general", "status").Run()
-	return err == nil
+	return exec.Command(nmcliPath, "-t", "general", "status").Run() == nil
+}
+
+// isIWDRunning checks that the iwd daemon is reachable by asking iwctl to
+// list devices; exits non-zero if iwd is not running.
+func isIWDRunning(iwctlPath string) bool {
+	return exec.Command(iwctlPath, "device", "list").Run() == nil
 }
