@@ -76,12 +76,14 @@ func (b *iwdBackend) Scan() ([]Network, error) {
 		security := parts[1] // "psk", "open", "8021x"
 		stars := parts[2]    // "****", "***", "**", "*"
 
+		authType := iwdAuthType(security)
 		secured := security != "open"
 		connected := status.Connected && status.SSID == ssid
 
 		networks = append(networks, Network{
 			SSID:      ssid,
 			Signal:    starsToDBm(stars),
+			AuthType:  authType,
 			Secured:   secured,
 			Known:     known[ssid] || connected,
 			Connected: connected,
@@ -245,6 +247,23 @@ func splitIwctlRow(line string) []string {
 		parts = append(parts, cur.String())
 	}
 	return parts
+}
+
+// iwdAuthType maps iwd's security field to a canonical auth string.
+func iwdAuthType(security string) string {
+	switch strings.TrimSpace(security) {
+	case "psk":
+		return "WPA2" // iwd uses psk for both WPA2 and WPA3; best guess
+	case "open":
+		return "Open"
+	case "8021x":
+		return "WPA2-Ent"
+	default:
+		if security != "" {
+			return security
+		}
+		return "Open"
+	}
 }
 
 // starsToDBm converts iwctl's 1–4 star signal display to approximate dBm.

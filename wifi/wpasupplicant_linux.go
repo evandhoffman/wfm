@@ -66,6 +66,8 @@ func (b *wpaBackend) Scan() ([]Network, error) {
 			slog.Debug("wpa scan_results: skipping malformed line", "line", line)
 			continue
 		}
+		bssid := strings.TrimSpace(fields[0])
+		freq, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
 		signal, _ := strconv.Atoi(strings.TrimSpace(fields[2]))
 		flags := fields[3]
 		ssid := fields[4]
@@ -73,20 +75,26 @@ func (b *wpaBackend) Scan() ([]Network, error) {
 			continue // hidden network
 		}
 
-		secured := strings.Contains(flags, "WPA") || strings.Contains(flags, "WEP")
+		authType := parseWpaFlags(flags)
+		secured := authType != "Open"
 		connected := status.Connected && status.SSID == ssid
 		_, isKnown := known[ssid]
 
 		if idx, exists := seen[ssid]; exists {
 			if signal > networks[idx].Signal {
 				networks[idx].Signal = signal
+				networks[idx].BSSID = bssid
+				networks[idx].Frequency = freq
 			}
 			continue
 		}
 		seen[ssid] = len(networks)
 		networks = append(networks, Network{
 			SSID:      ssid,
+			BSSID:     bssid,
 			Signal:    signal,
+			Frequency: freq,
+			AuthType:  authType,
 			Secured:   secured,
 			Known:     isKnown || connected,
 			Connected: connected,
@@ -219,6 +227,26 @@ func (b *wpaBackend) waitConnected() error {
 		}
 	}
 	return fmt.Errorf("timed out waiting for wpa_supplicant to reach COMPLETED state")
+}
+
+// parseWpaFlags extracts a human-readable auth type from wpa_supplicant
+// capability flags like "[WPA2-PSK+SAE-CCMP][ESS]".
+func parseWpaFlags(flags string) string {
+	hasWPA2 := strings.Contains(flags, "WPA2-PSK") || strings.Contains(flags, "RSN-PSK")
+	hasWPA3 := strings.Contains(flags, "SAE")
+	hasWEP := strings.Contains(flags, "WEP")
+	switch {
+	case hasWPA2 && hasWPA3:
+		return "WPA2/WPA3"
+	case hasWPA3:
+		return "WPA3"
+	case hasWPA2:
+		return "WPA2"
+	case hasWEP:
+		return "WEP"
+	default:
+		return "Open"
+	}
 }
 
 // lastLine returns the last non-empty line from s.

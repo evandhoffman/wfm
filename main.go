@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -23,12 +23,19 @@ var (
 	subtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	boldStyle   = lipgloss.NewStyle().Bold(true)
 
-	// Signal strength colours: green → yellow → orange → red.
-	sigVeryStrong = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // bright green
-	sigStrong     = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))  // lime
-	sigMedium     = lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
-	sigWeak       = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // orange
-	sigVeryWeak   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
+	tableStyles = func() table.Styles {
+		s := table.DefaultStyles()
+		s.Header = s.Header.
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			BorderBottom(true).
+			Bold(true)
+		s.Selected = s.Selected.
+			Foreground(lipgloss.Color("229")).
+			Background(lipgloss.Color("57")).
+			Bold(true)
+		return s
+	}()
 )
 
 // ---------------------------------------------------------------------------
@@ -40,40 +47,15 @@ type appState int
 const (
 	stateStartup       appState = iota // detecting backend
 	stateScanning                      // running Scan()
-	stateList                          // showing network list
+	stateList                          // showing network table
 	statePasswordEntry                 // prompting for WPA passphrase
 	stateConnecting                    // running Connect()
 	stateError                         // fatal error
 )
 
 // ---------------------------------------------------------------------------
-// List item
+// Signal helpers
 // ---------------------------------------------------------------------------
-
-type networkItem struct{ n wifi.Network }
-
-func (i networkItem) Title() string {
-	lock := "  " // open network
-	if i.n.Secured {
-		lock = "  " // locked
-	}
-	var tags string
-	if i.n.Connected {
-		tags += " [connected]"
-	} else if i.n.Known {
-		tags += " [saved]"
-	}
-	return fmt.Sprintf("%s%s%s", lock, i.n.SSID, tags)
-}
-
-func (i networkItem) Description() string {
-	style, label := signalMeta(i.n.Signal)
-	bars := style.Render(signalBars(i.n.Signal))
-	text := style.Render(label)
-	return fmt.Sprintf("%s  %d dBm  %s", bars, i.n.Signal, text)
-}
-
-func (i networkItem) FilterValue() string { return i.n.SSID }
 
 // signalBars converts a dBm value to a 4-block unicode bar display.
 func signalBars(dbm int) string {
@@ -91,20 +73,81 @@ func signalBars(dbm int) string {
 	}
 }
 
-// signalMeta returns the lipgloss style and human label for a dBm signal value.
-func signalMeta(dbm int) (lipgloss.Style, string) {
+// signalLabel returns a human-readable signal quality label.
+func signalLabel(dbm int) string {
 	switch {
 	case dbm >= -50:
-		return sigVeryStrong, "Very Strong"
+		return "Very Strong"
 	case dbm >= -60:
-		return sigStrong, "Strong"
+		return "Strong"
 	case dbm >= -70:
-		return sigMedium, "Medium"
+		return "Medium"
 	case dbm >= -80:
-		return sigWeak, "Weak"
+		return "Weak"
 	default:
-		return sigVeryWeak, "Very Weak"
+		return "Very Weak"
 	}
+}
+
+// freqToChannel converts a frequency in MHz to its 802.11 channel number.
+func freqToChannel(freq int) int {
+	switch {
+	case freq == 2484:
+		return 14
+	case freq >= 2412 && freq < 2484:
+		return (freq - 2407) / 5
+	case freq >= 5160 && freq <= 5885:
+		return (freq - 5000) / 5
+	case freq >= 5955:
+		return (freq - 5950) / 5
+	}
+	return 0
+}
+
+// freqToBand returns a short band label for a MHz frequency.
+func freqToBand(freq int) string {
+	switch {
+	case freq >= 2400 && freq < 2500:
+		return "2.4 GHz"
+	case freq >= 5000 && freq < 5900:
+		return "  5 GHz"
+	case freq >= 5900:
+		return "  6 GHz"
+	default:
+		return "       "
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Table column layout
+// ---------------------------------------------------------------------------
+
+// fixedColsRenderedWidth is the total rendered width (content + 2-char padding
+// per cell) of every column except SSID.
+//
+//	Bars(4)+pad Signal(7)+pad Quality(11)+pad Band(7)+pad Ch(3)+pad Auth(9)+pad BSSID(17)+pad
+//	= 6 + 9 + 13 + 9 + 5 + 11 + 19 = 72
+const fixedColsRenderedWidth = 72
+
+func tableColumns(ssidWidth int) []table.Column {
+	return []table.Column{
+		{Title: "SSID", Width: ssidWidth},
+		{Title: "Sig", Width: 4},
+		{Title: "dBm", Width: 7},
+		{Title: "Quality", Width: 11},
+		{Title: "Band", Width: 7},
+		{Title: "Ch", Width: 3},
+		{Title: "Auth", Width: 9},
+		{Title: "BSSID", Width: 17},
+	}
+}
+
+func ssidColumnWidth(termWidth int) int {
+	w := termWidth - fixedColsRenderedWidth - 2 // -2 for SSID cell padding
+	if w < 12 {
+		w = 12
+	}
+	return w
 }
 
 // ---------------------------------------------------------------------------
@@ -154,10 +197,12 @@ func connectCmd(b wifi.Backend, ssid, passphrase string) tea.Cmd {
 type model struct {
 	state    appState
 	backend  wifi.Backend
-	list     list.Model
+	networks []wifi.Network // parallel to table rows
+	table    table.Model
 	spinner  spinner.Model
 	input    textinput.Model
 	selected wifi.Network
+	width    int // current terminal width (for column resizing)
 	err      error
 }
 
@@ -170,14 +215,19 @@ func initialModel() model {
 	inp.EchoMode = textinput.EchoPassword
 	inp.EchoCharacter = '•'
 
-	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Available Networks"
+	t := table.New(
+		table.WithColumns(tableColumns(20)),
+		table.WithFocused(true),
+		table.WithHeight(10),
+		table.WithStyles(tableStyles),
+	)
 
 	return model{
 		state:   stateStartup,
-		list:    l,
+		table:   t,
 		spinner: sp,
 		input:   inp,
+		width:   80,
 	}
 }
 
@@ -193,8 +243,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		h, v := docStyle.GetFrameSize()
-		m.list.SetSize(msg.Width-h, msg.Height-v)
+		w := msg.Width - h
+		ht := msg.Height - v
+		m.table.SetWidth(w)
+		m.table.SetHeight(ht - 3) // leave room for header border + footer line
+		m.table.SetColumns(tableColumns(ssidColumnWidth(w)))
 		return m, nil
 
 	case tea.KeyMsg:
@@ -223,11 +278,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("scan failed: %w", msg.err)
 			return m, nil
 		}
-		items := make([]list.Item, len(msg.networks))
-		for i, n := range msg.networks {
-			items[i] = networkItem{n: n}
-		}
-		m.list.SetItems(items)
+		m.networks = msg.networks
+		m.table.SetRows(buildRows(msg.networks))
 		m.state = stateList
 		return m, nil
 
@@ -238,7 +290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("connection failed: %w", msg.err)
 			return m, nil
 		}
-		// Rescan so the list reflects the new connected state.
+		// Rescan so the table reflects the new connected state.
 		m.state = stateScanning
 		return m, scanCmd(m.backend)
 	}
@@ -257,8 +309,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stateScanning
 			return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
 		case "enter":
-			if item, ok := m.list.SelectedItem().(networkItem); ok {
-				return m.initiateConnect(item.n)
+			cursor := m.table.Cursor()
+			if cursor >= 0 && cursor < len(m.networks) {
+				return m.initiateConnect(m.networks[cursor])
 			}
 		}
 
@@ -281,7 +334,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case stateError:
-		// Any key exits; the error is unrecoverable in this session.
 		switch msg.String() {
 		case "ctrl+c", "q", "esc", "enter":
 			return m, tea.Quit
@@ -315,11 +367,41 @@ func (m model) updateActiveComponent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.state {
 	case stateList:
-		m.list, cmd = m.list.Update(msg)
+		m.table, cmd = m.table.Update(msg)
 	case statePasswordEntry:
 		m.input, cmd = m.input.Update(msg)
 	}
 	return m, cmd
+}
+
+// buildRows converts a slice of Networks into table rows.
+func buildRows(networks []wifi.Network) []table.Row {
+	rows := make([]table.Row, len(networks))
+	for i, n := range networks {
+		ssid := n.SSID
+		if n.Connected {
+			ssid += " [connected]"
+		} else if n.Known {
+			ssid += " [saved]"
+		}
+		chStr := ""
+		if n.Frequency > 0 {
+			if ch := freqToChannel(n.Frequency); ch > 0 {
+				chStr = fmt.Sprintf("%d", ch)
+			}
+		}
+		rows[i] = table.Row{
+			ssid,
+			signalBars(n.Signal),
+			fmt.Sprintf("%d dBm", n.Signal),
+			signalLabel(n.Signal),
+			freqToBand(n.Frequency),
+			chStr,
+			n.AuthType,
+			n.BSSID,
+		}
+	}
+	return rows
 }
 
 // ---------------------------------------------------------------------------
@@ -335,8 +417,8 @@ func (m model) View() string {
 		return docStyle.Render(fmt.Sprintf("%s Scanning for networks…", m.spinner.View()))
 
 	case stateList:
-		footer := subtleStyle.Render("enter: connect • r: rescan • q: quit")
-		return docStyle.Render(m.list.View() + "\n" + footer)
+		footer := subtleStyle.Render("↑/↓: navigate • enter: connect • r: rescan • q: quit")
+		return docStyle.Render(m.table.View() + "\n" + footer)
 
 	case statePasswordEntry:
 		return docStyle.Render(fmt.Sprintf(

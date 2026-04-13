@@ -28,7 +28,7 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 
 	out, err := exec.Command(b.bin,
 		"--terse",
-		"--fields", "IN-USE,SSID,SIGNAL,SECURITY",
+		"--fields", "IN-USE,BSSID,SSID,SIGNAL,FREQ,SECURITY",
 		"dev", "wifi", "list",
 	).Output()
 	if err != nil {
@@ -41,7 +41,8 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 		known = map[string]bool{}
 	}
 
-	seen := map[string]bool{}
+	// seen maps SSID → index in networks; store best (active or strongest) entry.
+	seen := map[string]int{}
 	var networks []Network
 
 	sc := bufio.NewScanner(bytes.NewReader(out))
@@ -50,30 +51,44 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 		if line == "" {
 			continue
 		}
-		fields := splitTerse(line, 4)
-		if len(fields) < 4 {
+		// Fields: IN-USE, BSSID, SSID, SIGNAL, FREQ, SECURITY
+		fields := splitTerse(line, 6)
+		if len(fields) < 6 {
 			slog.Debug("skipping malformed nmcli line", "line", line)
 			continue
 		}
 
 		inUse := strings.TrimSpace(fields[0]) == "*"
-		ssid := fields[1]
+		bssid := strings.TrimSpace(fields[1])
+		ssid := fields[2]
 		if ssid == "" || ssid == "--" {
 			continue // hidden network
 		}
-		// Deduplicate: nmcli lists one row per BSSID; keep strongest or active.
-		if seen[ssid] && !inUse {
+
+		quality, _ := strconv.Atoi(strings.TrimSpace(fields[3]))
+		signal := qualityToDBm(quality)
+		freq := parseNmcliFreq(fields[4])
+		security := strings.TrimSpace(fields[5])
+		authType := parseNmcliSecurity(security)
+		secured := authType != "Open"
+
+		if idx, exists := seen[ssid]; exists {
+			// Prefer the active entry; otherwise keep strongest signal.
+			if inUse || signal > networks[idx].Signal {
+				networks[idx].Signal = signal
+				networks[idx].BSSID = bssid
+				networks[idx].Frequency = freq
+				networks[idx].Connected = inUse
+			}
 			continue
 		}
-		seen[ssid] = true
-
-		quality, _ := strconv.Atoi(fields[2])
-		security := strings.TrimSpace(fields[3])
-		secured := security != "" && security != "--"
-
+		seen[ssid] = len(networks)
 		networks = append(networks, Network{
 			SSID:      ssid,
-			Signal:    qualityToDBm(quality),
+			BSSID:     bssid,
+			Signal:    signal,
+			Frequency: freq,
+			AuthType:  authType,
 			Secured:   secured,
 			Known:     known[ssid] || inUse,
 			Connected: inUse,
@@ -205,6 +220,48 @@ func splitTerse(line string, n int) []string {
 		}
 	}
 	return append(fields, cur.String())
+}
+
+// parseNmcliFreq parses nmcli's FREQ field, which looks like "2437 MHz" or
+// "5745 MHz", and returns the integer MHz value.
+func parseNmcliFreq(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "--" {
+		return 0
+	}
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return 0
+	}
+	// Handle both integer and float representations (e.g. "5745" or "5745.0").
+	f, _ := strconv.ParseFloat(parts[0], 64)
+	return int(f)
+}
+
+// parseNmcliSecurity maps nmcli's SECURITY field to a canonical auth string.
+// nmcli may report values like "WPA2", "WPA1 WPA2", "WPA3", "WPA2 WPA3", "--".
+func parseNmcliSecurity(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "--" {
+		return "Open"
+	}
+	hasWPA1 := strings.Contains(s, "WPA1")
+	hasWPA2 := strings.Contains(s, "WPA2")
+	hasWPA3 := strings.Contains(s, "WPA3")
+	switch {
+	case hasWPA2 && hasWPA3:
+		return "WPA2/WPA3"
+	case hasWPA1 && hasWPA2:
+		return "WPA/WPA2"
+	case hasWPA3:
+		return "WPA3"
+	case hasWPA2:
+		return "WPA2"
+	case hasWPA1:
+		return "WPA"
+	default:
+		return s // WEP, OWE, etc. — pass through
+	}
 }
 
 // qualityToDBm converts nmcli's 0-100 signal-quality percentage to

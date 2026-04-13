@@ -6,10 +6,13 @@ package wifi
 // Network represents a WiFi access point discovered during a scan.
 type Network struct {
 	SSID      string
-	Signal    int  // dBm; e.g. -45 (strong) to -90 (very weak)
-	Secured   bool // requires a passphrase (WPA2/WPA3-Personal)
-	Known     bool // this system already has credentials stored for it
-	Connected bool // currently the active connection
+	BSSID     string // MAC address of the strongest-signal AP; empty if unknown
+	Signal    int    // dBm; e.g. -45 (strong) to -90 (very weak)
+	Frequency int    // MHz; e.g. 2437, 5745; 0 if unknown
+	AuthType  string // "WPA2", "WPA3", "WPA2/WPA3", "WEP", "Open"; empty if unknown
+	Secured   bool   // requires a passphrase (WPA2/WPA3-Personal)
+	Known     bool   // this system already has credentials stored for it
+	Connected bool   // currently the active connection
 }
 
 // ConnectionStatus is the current state of the wireless interface.
