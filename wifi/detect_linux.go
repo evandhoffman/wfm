@@ -5,7 +5,10 @@ package wifi
 import (
 	"errors"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // Detect probes the running system and returns the best available Backend.
@@ -14,7 +17,8 @@ import (
 //
 // Detection order:
 //  1. NetworkManager (nmcli) — most common on Ubuntu, Fedora, Debian, etc.
-//  2. iwd (iwctl)            — Arch Linux, Raspberry Pi OS Lite, minimal systems
+//  2. iwd (iwctl)            — Arch Linux, some minimal systems
+//  3. wpa_supplicant (wpa_cli) — Raspberry Pi OS, Debian, Ubuntu minimal
 func Detect() (Backend, error) {
 	if nmcliPath, err := exec.LookPath("nmcli"); err == nil {
 		slog.Debug("found nmcli", "path", nmcliPath)
@@ -34,10 +38,20 @@ func Detect() (Backend, error) {
 		slog.Warn("iwctl present but iwd is not running")
 	}
 
+	if wpacliPath, err := exec.LookPath("wpa_cli"); err == nil {
+		slog.Debug("found wpa_cli", "path", wpacliPath)
+		if ctrlDir, iface, ok := wpaCtrlSocket(wpacliPath); ok {
+			slog.Info("using wpa_supplicant backend", "wpa_cli", wpacliPath, "iface", iface, "ctrl_dir", ctrlDir)
+			return &wpaBackend{bin: wpacliPath, ctrlDir: ctrlDir, iface: iface}, nil
+		}
+		slog.Warn("wpa_cli present but no responsive control socket found")
+	}
+
 	return nil, errors.New(
 		"no supported WiFi backend found\n" +
-			"  • NetworkManager: install or start with: sudo systemctl start NetworkManager\n" +
-			"  • iwd: install or start with: sudo systemctl start iwd",
+			"  • NetworkManager: sudo systemctl start NetworkManager\n" +
+			"  • iwd:            sudo systemctl start iwd\n" +
+			"  • wpa_supplicant: sudo systemctl start wpa_supplicant@<iface>",
 	)
 }
 
@@ -51,4 +65,36 @@ func isNMRunning(nmcliPath string) bool {
 // list devices; exits non-zero if iwd is not running.
 func isIWDRunning(iwctlPath string) bool {
 	return exec.Command(iwctlPath, "device", "list").Run() == nil
+}
+
+// wifiInterfaces returns the names of all wireless interfaces on the system
+// by scanning /sys/class/net for entries that have a "wireless" subdirectory
+// (set by the kernel for any 802.11 device).
+func wifiInterfaces() []string {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil
+	}
+	var ifaces []string
+	for _, e := range entries {
+		if _, err := os.Stat(filepath.Join("/sys/class/net", e.Name(), "wireless")); err == nil {
+			ifaces = append(ifaces, e.Name())
+		}
+	}
+	return ifaces
+}
+
+// wpaCtrlSocket searches for a live wpa_supplicant control socket by pinging
+// each wireless interface in the common socket directories.
+// Returns the socket directory and interface name on success.
+func wpaCtrlSocket(wpacliPath string) (ctrlDir, iface string, ok bool) {
+	for _, dir := range []string{"/run/wpa_supplicant", "/var/run/wpa_supplicant"} {
+		for _, ifname := range wifiInterfaces() {
+			out, err := exec.Command(wpacliPath, "-p", dir, "-i", ifname, "ping").Output()
+			if err == nil && strings.Contains(string(out), "PONG") {
+				return dir, ifname, true
+			}
+		}
+	}
+	return "", "", false
 }
