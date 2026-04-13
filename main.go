@@ -31,11 +31,14 @@ var (
 			BorderBottom(true).
 			Bold(true)
 		s.Selected = s.Selected.
-			Foreground(lipgloss.Color("229")).
-			Background(lipgloss.Color("57")).
+			Foreground(lipgloss.Color("255")).
+			Background(lipgloss.Color("24")).
 			Bold(true)
 		return s
 	}()
+
+	connectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)  // bright green
+	savedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))            // dim grey
 )
 
 // ---------------------------------------------------------------------------
@@ -125,12 +128,13 @@ func freqToBand(freq int) string {
 // fixedColsRenderedWidth is the total rendered width (content + 2-char padding
 // per cell) of every column except SSID.
 //
-//	Bars(4)+pad Signal(7)+pad Quality(11)+pad Band(7)+pad Ch(3)+pad Auth(9)+pad BSSID(17)+pad
-//	= 6 + 9 + 13 + 9 + 5 + 11 + 19 = 72
-const fixedColsRenderedWidth = 72
+//	Status(1)+pad SSID(dynamic)+pad Bars(4)+pad dBm(7)+pad Quality(11)+pad Band(7)+pad Ch(3)+pad Auth(9)+pad BSSID(17)+pad
+//	fixed (excluding SSID): 3 + 6 + 9 + 13 + 9 + 5 + 11 + 19 = 75
+const fixedColsRenderedWidth = 75
 
 func tableColumns(ssidWidth int) []table.Column {
 	return []table.Column{
+		{Title: " ", Width: 1},         // connection status indicator
 		{Title: "SSID", Width: ssidWidth},
 		{Title: "Sig", Width: 4},
 		{Title: "dBm", Width: 7},
@@ -161,6 +165,7 @@ type (
 	}
 	scanResultMsg struct {
 		networks []wifi.Network
+		status   wifi.ConnectionStatus
 		err      error
 	}
 	connectResultMsg struct{ err error }
@@ -178,7 +183,11 @@ func detectBackendCmd() tea.Msg {
 func scanCmd(b wifi.Backend) tea.Cmd {
 	return func() tea.Msg {
 		nets, err := b.Scan()
-		return scanResultMsg{networks: nets, err: err}
+		if err != nil {
+			return scanResultMsg{err: err}
+		}
+		status, _ := b.Status()
+		return scanResultMsg{networks: nets, status: status}
 	}
 }
 
@@ -195,15 +204,16 @@ func connectCmd(b wifi.Backend, ssid, passphrase string) tea.Cmd {
 // ---------------------------------------------------------------------------
 
 type model struct {
-	state    appState
-	backend  wifi.Backend
-	networks []wifi.Network // parallel to table rows
-	table    table.Model
-	spinner  spinner.Model
-	input    textinput.Model
-	selected wifi.Network
-	width    int // current terminal width (for column resizing)
-	err      error
+	state      appState
+	backend    wifi.Backend
+	networks   []wifi.Network // parallel to table rows
+	connStatus wifi.ConnectionStatus
+	table      table.Model
+	spinner    spinner.Model
+	input      textinput.Model
+	selected   wifi.Network
+	width      int // current terminal width (for column resizing)
+	err        error
 }
 
 func initialModel() model {
@@ -279,6 +289,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.networks = msg.networks
+		m.connStatus = msg.status
 		m.table.SetRows(buildRows(msg.networks))
 		m.state = stateList
 		return m, nil
@@ -374,16 +385,59 @@ func (m model) updateActiveComponent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// connectionBar returns a one-line summary of the current WiFi connection,
+// or an empty string when not connected.
+func (m model) connectionBar() string {
+	cs := m.connStatus
+	if !cs.Connected {
+		return subtleStyle.Render("Not connected")
+	}
+	parts := []string{connectedStyle.Render("● " + cs.SSID)}
+	if cs.IPAddress != "" {
+		parts = append(parts, "IP: "+cs.IPAddress)
+	} else {
+		parts = append(parts, subtleStyle.Render("(no IPv4)"))
+	}
+	if cs.Gateway != "" {
+		parts = append(parts, "GW: "+cs.Gateway)
+	}
+	if cs.DNS != "" {
+		parts = append(parts, "DNS: "+cs.DNS)
+	}
+	sep := subtleStyle.Render("  ·  ")
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += sep
+		}
+		result += p
+	}
+	return result
+}
+
 // buildRows converts a slice of Networks into table rows.
 func buildRows(networks []wifi.Network) []table.Row {
 	rows := make([]table.Row, len(networks))
 	for i, n := range networks {
+		// Status indicator column: ● connected, ○ saved, space otherwise.
+		var status string
+		switch {
+		case n.Connected:
+			status = connectedStyle.Render("●")
+		case n.Known:
+			status = savedStyle.Render("○")
+		default:
+			status = " "
+		}
+
+		// SSID with [connected]/[saved] suffix for screen-reader / no-colour clarity.
 		ssid := n.SSID
 		if n.Connected {
 			ssid += " [connected]"
 		} else if n.Known {
 			ssid += " [saved]"
 		}
+
 		chStr := ""
 		if n.Frequency > 0 {
 			if ch := freqToChannel(n.Frequency); ch > 0 {
@@ -391,6 +445,7 @@ func buildRows(networks []wifi.Network) []table.Row {
 			}
 		}
 		rows[i] = table.Row{
+			status,
 			ssid,
 			signalBars(n.Signal),
 			fmt.Sprintf("%d dBm", n.Signal),
@@ -417,8 +472,9 @@ func (m model) View() string {
 		return docStyle.Render(fmt.Sprintf("%s Scanning for networks…", m.spinner.View()))
 
 	case stateList:
+		connBar := m.connectionBar()
 		footer := subtleStyle.Render("↑/↓: navigate • enter: connect • r: rescan • q: quit")
-		return docStyle.Render(m.table.View() + "\n" + footer)
+		return docStyle.Render(m.table.View() + "\n" + connBar + "\n" + footer)
 
 	case statePasswordEntry:
 		return docStyle.Render(fmt.Sprintf(

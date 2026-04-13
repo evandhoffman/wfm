@@ -11,6 +11,67 @@ import (
 	"strings"
 )
 
+// ifaceNetInfo reads IPv4 address (CIDR), default gateway, and DNS servers for
+// iface by shelling out to standard Linux tools. All fields are best-effort;
+// empty string means "not available".
+func ifaceNetInfo(iface string) (ipAddr, gateway, dns string) {
+	// IPv4 address from `ip -4 addr show <iface>`.
+	if out, err := exec.Command("ip", "-4", "addr", "show", iface).Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "inet ") {
+				if parts := strings.Fields(line); len(parts) >= 2 {
+					ipAddr = parts[1] // e.g. "192.168.1.100/24"
+				}
+				break
+			}
+		}
+	}
+
+	// Default gateway from `ip -4 route show dev <iface>`.
+	if out, err := exec.Command("ip", "-4", "route", "show", "dev", iface).Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "default via ") {
+				if parts := strings.Fields(line); len(parts) >= 3 {
+					gateway = parts[2]
+				}
+				break
+			}
+		}
+	}
+
+	// DNS: prefer per-interface info from resolvectl, fall back to resolv.conf.
+	dns = ifaceDNS(iface)
+	return
+}
+
+// ifaceDNS returns space-separated DNS servers for iface.
+func ifaceDNS(iface string) string {
+	// resolvectl dns <iface> emits lines like "Link 3 (wlan0): 1.1.1.1 1.0.0.1"
+	if out, err := exec.Command("resolvectl", "dns", iface).Output(); err == nil {
+		line := strings.TrimSpace(string(out))
+		if idx := strings.Index(line, ":"); idx >= 0 {
+			servers := strings.TrimSpace(line[idx+1:])
+			if servers != "" {
+				return servers
+			}
+		}
+	}
+	// Fall back to nameserver lines in /etc/resolv.conf.
+	if data, err := os.ReadFile("/etc/resolv.conf"); err == nil {
+		var servers []string
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "nameserver ") {
+				if parts := strings.Fields(line); len(parts) >= 2 {
+					servers = append(servers, parts[1])
+				}
+			}
+		}
+		return strings.Join(servers, " ")
+	}
+	return ""
+}
+
 // Detect probes the running system and returns the best available Backend.
 // It checks for required binaries upfront and returns a descriptive error
 // if no supported WiFi subsystem is found.

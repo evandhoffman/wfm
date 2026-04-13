@@ -151,7 +151,11 @@ func (b *nmcliBackend) Status() (ConnectionStatus, error) {
 	for sc.Scan() {
 		fields := splitTerse(sc.Text(), 2)
 		if len(fields) == 2 && strings.TrimSpace(fields[0]) == "*" {
-			return ConnectionStatus{Connected: true, SSID: fields[1]}, nil
+			cs := ConnectionStatus{Connected: true, SSID: fields[1]}
+			if iface, err := b.wifiInterface(); err == nil {
+				cs.IPAddress, cs.Gateway, cs.DNS = ifaceNetInfo(iface)
+			}
+			return cs, nil
 		}
 	}
 	return ConnectionStatus{Connected: true}, nil

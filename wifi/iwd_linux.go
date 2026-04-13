@@ -154,9 +154,10 @@ func (b *iwdBackend) Status() (ConnectionStatus, error) {
 			cs.Connected = parts[1] == "connected"
 		case "Connected network":
 			cs.SSID = parts[1]
-		case "IPv4 address":
-			cs.IPAddress = parts[1]
 		}
+	}
+	if cs.Connected {
+		cs.IPAddress, cs.Gateway, cs.DNS = ifaceNetInfo(iface)
 	}
 	return cs, nil
 }

@@ -19,7 +19,9 @@ type Network struct {
 type ConnectionStatus struct {
 	Connected bool
 	SSID      string
-	IPAddress string
+	IPAddress string // CIDR, e.g. "192.168.1.100/24"; empty if no IPv4
+	Gateway   string // default gateway IPv4; empty if unknown
+	DNS       string // space-separated nameservers; empty if unknown
 }
 
 // Backend is implemented by each WiFi subsystem (NetworkManager, iwd, …).

@@ -185,9 +185,10 @@ func (b *wpaBackend) Status() (ConnectionStatus, error) {
 			cs.Connected = v == "COMPLETED"
 		case "ssid":
 			cs.SSID = v
-		case "ip_address":
-			cs.IPAddress = v
 		}
+	}
+	if cs.Connected {
+		cs.IPAddress, cs.Gateway, cs.DNS = ifaceNetInfo(b.iface)
 	}
 	return cs, nil
 }
