@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
@@ -134,6 +135,11 @@ func freqToBand(freq int) string {
 // Table column layout
 // ---------------------------------------------------------------------------
 
+// logPaneHeight is the number of log lines shown in the activity pane.
+// The pane always occupies exactly logPaneHeight+1 rows (separator + lines)
+// so the table height never shifts when log content appears.
+const logPaneHeight = 5
+
 // fixedColsRenderedWidth is the total rendered width (content + 2-char padding
 // per cell) of every column except SSID.
 //
@@ -175,6 +181,7 @@ type (
 		err      error
 	}
 	connectResultMsg struct{ err error }
+	logMsg           struct{ line string }
 )
 
 // ---------------------------------------------------------------------------
@@ -205,6 +212,14 @@ func connectCmd(b wifi.Backend, ssid, passphrase string) tea.Cmd {
 	}
 }
 
+// logCmd creates a command that delivers a timestamped log line to the model.
+// The timestamp is captured at call time so ordering is preserved even if
+// the runtime delivers the message slightly later.
+func logCmd(format string, args ...any) tea.Cmd {
+	line := time.Now().Format("15:04:05.00") + "  " + fmt.Sprintf(format, args...)
+	return func() tea.Msg { return logMsg{line: line} }
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -218,8 +233,9 @@ type model struct {
 	spinner    spinner.Model
 	input      textinput.Model
 	selected   wifi.Network
-	width      int // current terminal width
-	height     int // current terminal height
+	logLines   []string // activity log; capped at 200 entries
+	width      int      // current terminal width
+	height     int      // current terminal height
 	err        error
 }
 
@@ -249,7 +265,7 @@ func initialModel() model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(detectBackendCmd, m.spinner.Tick)
+	return tea.Batch(detectBackendCmd, m.spinner.Tick, logCmd("detecting WiFi backend…"))
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +282,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		w := msg.Width - h
 		ht := msg.Height - v
 		m.table.SetWidth(w)
-		m.table.SetHeight(ht - 3) // leave room for header border + footer line
+		m.table.SetHeight(ht - 3 - (logPaneHeight + 1)) // +1 for separator line
 		m.table.SetColumns(tableColumns(ssidColumnWidth(w)))
 		return m, nil
 
@@ -278,40 +294,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
+	case logMsg:
+		m.logLines = append(m.logLines, msg.line)
+		if len(m.logLines) > 200 {
+			m.logLines = m.logLines[len(m.logLines)-200:]
+		}
+		return m, nil
+
 	case backendReadyMsg:
 		if msg.err != nil {
 			slog.Error("backend detection failed", "err", msg.err)
 			m.state = stateError
 			m.err = msg.err
-			return m, nil
+			return m, logCmd("backend detection failed: %v", msg.err)
 		}
 		m.backend = msg.backend
 		m.state = stateScanning
-		return m, scanCmd(m.backend)
+		return m, tea.Batch(logCmd("backend ready, scanning…"), scanCmd(m.backend))
 
 	case scanResultMsg:
 		if msg.err != nil {
 			slog.Error("scan failed", "err", msg.err)
 			m.state = stateError
 			m.err = fmt.Errorf("scan failed: %w", msg.err)
-			return m, nil
+			return m, logCmd("scan failed: %v", msg.err)
 		}
 		m.networks = msg.networks
 		m.connStatus = msg.status
 		m.table.SetRows(buildRows(msg.networks))
 		m.state = stateList
-		return m, nil
+		return m, logCmd("scan complete — %d networks found", len(msg.networks))
 
 	case connectResultMsg:
 		if msg.err != nil {
 			slog.Error("connect failed", "err", msg.err)
 			m.state = stateError
 			m.err = fmt.Errorf("connection failed: %w", msg.err)
-			return m, nil
+			return m, logCmd("connection failed: %v", msg.err)
 		}
 		// Rescan so the table reflects the new connected state.
 		m.state = stateScanning
-		return m, scanCmd(m.backend)
+		return m, tea.Batch(logCmd("connected to %q, rescanning…", m.selected.SSID), scanCmd(m.backend))
 	}
 
 	return m.updateActiveComponent(msg)
@@ -326,7 +349,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r", " ":
 			m.state = stateScanning
-			return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
+			return m, tea.Batch(logCmd("rescanning…"), scanCmd(m.backend), m.spinner.Tick)
 		case "i":
 			cursor := m.table.Cursor()
 			if cursor >= 0 && cursor < len(m.networks) {
@@ -358,6 +381,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.state = stateConnecting
 			return m, tea.Batch(
+				logCmd("connecting to %q…", m.selected.SSID),
 				connectCmd(m.backend, m.selected.SSID, pass),
 				m.spinner.Tick,
 			)
@@ -384,7 +408,7 @@ func (m model) initiateConnect(n wifi.Network) (tea.Model, tea.Cmd) {
 	if !n.Secured || n.Known {
 		slog.Info("connecting without passphrase", "ssid", n.SSID, "known", n.Known)
 		m.state = stateConnecting
-		return m, tea.Batch(connectCmd(m.backend, n.SSID, ""), m.spinner.Tick)
+		return m, tea.Batch(logCmd("connecting to %q…", n.SSID), connectCmd(m.backend, n.SSID, ""), m.spinner.Tick)
 	}
 	m.state = statePasswordEntry
 	m.input.Placeholder = fmt.Sprintf("passphrase for %q", n.SSID)
@@ -519,6 +543,29 @@ func (m model) detailView() string {
 	return out
 }
 
+// logPaneView renders the activity log pane. It always returns exactly
+// logPaneHeight+1 lines (separator + logPaneHeight rows) so the surrounding
+// layout never shifts regardless of how many log entries exist.
+func (m model) logPaneView(contentWidth int) string {
+	sep := subtleStyle.Render(strings.Repeat("─", contentWidth))
+
+	start := len(m.logLines) - logPaneHeight
+	if start < 0 {
+		start = 0
+	}
+	visible := m.logLines[start:]
+
+	parts := make([]string, 0, 1+logPaneHeight)
+	parts = append(parts, sep)
+	for _, l := range visible {
+		parts = append(parts, subtleStyle.Render("  "+l))
+	}
+	for i := len(visible); i < logPaneHeight; i++ {
+		parts = append(parts, "") // empty padding lines to keep height fixed
+	}
+	return strings.Join(parts, "\n")
+}
+
 // buildRows converts a slice of Networks into table rows.
 func buildRows(networks []wifi.Network) []table.Row {
 	rows := make([]table.Row, len(networks))
@@ -561,13 +608,14 @@ func (m model) rescanOverlayView() string {
 	// Build the background: blurred table + connection bar + footer.
 	t := m.table
 	t.Blur()
-	connBar := m.connectionBar()
-	footer := subtleStyle.Render("↑/↓: navigate • enter: connect • i: info • r/space: rescan • q: quit")
-	bg := t.View() + "\n" + connBar + "\n" + footer
-
 	h, v := docStyle.GetFrameSize()
 	contentW := m.width - h
 	contentH := m.height - v
+
+	connBar := m.connectionBar()
+	footer := subtleStyle.Render("↑/↓: navigate • enter: connect • i: info • r/space: rescan • q: quit")
+	logPane := m.logPaneView(contentW)
+	bg := t.View() + "\n" + logPane + "\n" + connBar + "\n" + footer
 
 	// Strip ANSI from every background line, pad to contentW, apply faint.
 	faint := lipgloss.NewStyle().Faint(true)
@@ -636,9 +684,11 @@ func (m model) View() string {
 		return m.rescanOverlayView()
 
 	case stateList:
+		h, _ := docStyle.GetFrameSize()
 		connBar := m.connectionBar()
 		footer := subtleStyle.Render("↑/↓: navigate • enter: connect • i: info • r/space: rescan • q: quit")
-		return docStyle.Render(m.table.View() + "\n" + connBar + "\n" + footer)
+		logPane := m.logPaneView(m.width - h)
+		return docStyle.Render(m.table.View() + "\n" + logPane + "\n" + connBar + "\n" + footer)
 
 	case stateDetail:
 		return docStyle.Render(m.detailView())
@@ -652,17 +702,23 @@ func (m model) View() string {
 		))
 
 	case stateConnecting:
+		h, _ := docStyle.GetFrameSize()
+		logPane := m.logPaneView(m.width - h)
 		return docStyle.Render(fmt.Sprintf(
-			"%s Connecting to %s…",
+			"%s Connecting to %s…\n\n%s",
 			m.spinner.View(),
 			boldStyle.Render(m.selected.SSID),
+			logPane,
 		))
 
 	case stateError:
+		h, _ := docStyle.GetFrameSize()
+		logPane := m.logPaneView(m.width - h)
 		return docStyle.Render(fmt.Sprintf(
-			"%s\n\n%s\n\n%s",
+			"%s\n\n%s\n\n%s\n\n%s",
 			errorStyle.Render("Error"),
 			m.err.Error(),
+			logPane,
 			subtleStyle.Render("press any key to exit"),
 		))
 	}
