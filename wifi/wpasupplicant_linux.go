@@ -81,6 +81,7 @@ func (b *wpaBackend) Scan() ([]Network, error) {
 		_, isKnown := known[ssid]
 
 		if idx, exists := seen[ssid]; exists {
+			networks[idx].APCount++
 			if signal > networks[idx].Signal {
 				networks[idx].Signal = signal
 				networks[idx].BSSID = bssid
@@ -98,6 +99,9 @@ func (b *wpaBackend) Scan() ([]Network, error) {
 			Secured:   secured,
 			Known:     isKnown || connected,
 			Connected: connected,
+			APCount:   1,
+			Standard:  wpaStandard(flags, freq),
+			ChanWidth: wpaChanWidth(flags),
 		})
 	}
 	return networks, sc.Err()
@@ -189,6 +193,7 @@ func (b *wpaBackend) Status() (ConnectionStatus, error) {
 	}
 	if cs.Connected {
 		cs.IPAddress, cs.Gateway, cs.DNS = ifaceNetInfo(b.iface)
+		cs.LinkSpeed = ifaceLinkSpeed(b.iface)
 	}
 	return cs, nil
 }
@@ -247,6 +252,39 @@ func parseWpaFlags(flags string) string {
 		return "WEP"
 	default:
 		return "Open"
+	}
+}
+
+// wpaStandard maps wpa_supplicant capability flags to a WiFi generation string.
+// Flags like [HT], [VHT], [HE] correspond to 802.11n/ac/ax (WiFi 4/5/6).
+func wpaStandard(flags string, freq int) string {
+	switch {
+	case strings.Contains(flags, "[HE]"):
+		if freq >= 5955 {
+			return "WiFi 6E"
+		}
+		return "WiFi 6"
+	case strings.Contains(flags, "[VHT]"):
+		return "WiFi 5"
+	case strings.Contains(flags, "[HT]"):
+		return "WiFi 4"
+	default:
+		return ""
+	}
+}
+
+// wpaChanWidth extracts the channel width in MHz from wpa_supplicant flags.
+// Without full IE parsing, VHT and HE are assumed to be 80 MHz (most common).
+func wpaChanWidth(flags string) int {
+	switch {
+	case strings.Contains(flags, "[HT40+]") || strings.Contains(flags, "[HT40-]"):
+		return 40
+	case strings.Contains(flags, "[VHT]"), strings.Contains(flags, "[HE]"):
+		return 80
+	case strings.Contains(flags, "[HT]"):
+		return 20
+	default:
+		return 20
 	}
 }
 

@@ -11,6 +11,27 @@ import (
 	"strings"
 )
 
+// ifaceLinkSpeed returns the negotiated TX link rate for iface by parsing
+// `iw dev <iface> link`. Returns an empty string if iw is unavailable or the
+// interface is not associated.
+func ifaceLinkSpeed(iface string) string {
+	out, err := exec.Command("iw", "dev", iface, "link").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "tx bitrate:") {
+			// "tx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz VHT-NSS 2"
+			parts := strings.Fields(strings.TrimPrefix(line, "tx bitrate:"))
+			if len(parts) >= 2 {
+				return parts[0] + " " + parts[1]
+			}
+		}
+	}
+	return ""
+}
+
 // ifaceNetInfo reads IPv4 address (CIDR), default gateway, and DNS servers for
 // iface by shelling out to standard Linux tools. All fields are best-effort;
 // empty string means "not available".

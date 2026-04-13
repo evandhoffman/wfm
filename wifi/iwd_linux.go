@@ -158,6 +158,7 @@ func (b *iwdBackend) Status() (ConnectionStatus, error) {
 	}
 	if cs.Connected {
 		cs.IPAddress, cs.Gateway, cs.DNS = ifaceNetInfo(iface)
+		cs.LinkSpeed = ifaceLinkSpeed(iface)
 	}
 	return cs, nil
 }

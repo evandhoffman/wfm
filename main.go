@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
@@ -41,6 +43,12 @@ var (
 	savedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))            // dim grey
 )
 
+// ansiEscape matches ANSI/VT escape sequences so we can strip them from
+// rendered strings before doing character-level width calculations.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+func stripANSI(s string) string { return ansiEscape.ReplaceAllString(s, "") }
+
 // ---------------------------------------------------------------------------
 // App state machine
 // ---------------------------------------------------------------------------
@@ -51,6 +59,7 @@ const (
 	stateStartup       appState = iota // detecting backend
 	stateScanning                      // running Scan()
 	stateList                          // showing network table
+	stateDetail                        // full info for one network
 	statePasswordEntry                 // prompting for WPA passphrase
 	stateConnecting                    // running Connect()
 	stateError                         // fatal error
@@ -128,21 +137,18 @@ func freqToBand(freq int) string {
 // fixedColsRenderedWidth is the total rendered width (content + 2-char padding
 // per cell) of every column except SSID.
 //
-//	Status(1)+pad SSID(dynamic)+pad Bars(4)+pad dBm(7)+pad Quality(11)+pad Band(7)+pad Ch(3)+pad Auth(9)+pad BSSID(17)+pad
-//	fixed (excluding SSID): 3 + 6 + 9 + 13 + 9 + 5 + 11 + 19 = 75
-const fixedColsRenderedWidth = 75
+//	Status(1)+pad SSID(dynamic)+pad Bars(4)+pad dBm(7)+pad Band(7)+pad Auth(9)+pad
+//	fixed (excluding SSID): 3 + 6 + 9 + 9 + 11 = 38
+const fixedColsRenderedWidth = 38
 
 func tableColumns(ssidWidth int) []table.Column {
 	return []table.Column{
-		{Title: " ", Width: 1},         // connection status indicator
+		{Title: " ", Width: 1}, // connection status indicator
 		{Title: "SSID", Width: ssidWidth},
 		{Title: "Sig", Width: 4},
 		{Title: "dBm", Width: 7},
-		{Title: "Quality", Width: 11},
 		{Title: "Band", Width: 7},
-		{Title: "Ch", Width: 3},
 		{Title: "Auth", Width: 9},
-		{Title: "BSSID", Width: 17},
 	}
 }
 
@@ -212,7 +218,8 @@ type model struct {
 	spinner    spinner.Model
 	input      textinput.Model
 	selected   wifi.Network
-	width      int // current terminal width (for column resizing)
+	width      int // current terminal width
+	height     int // current terminal height
 	err        error
 }
 
@@ -254,6 +261,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		h, v := docStyle.GetFrameSize()
 		w := msg.Width - h
 		ht := msg.Height - v
@@ -316,15 +324,26 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "r":
+		case "r", " ":
 			m.state = stateScanning
 			return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
+		case "i":
+			cursor := m.table.Cursor()
+			if cursor >= 0 && cursor < len(m.networks) {
+				m.selected = m.networks[cursor]
+				m.state = stateDetail
+			}
+			return m, nil
 		case "enter":
 			cursor := m.table.Cursor()
 			if cursor >= 0 && cursor < len(m.networks) {
 				return m.initiateConnect(m.networks[cursor])
 			}
 		}
+
+	case stateDetail:
+		m.state = stateList
+		return m, nil
 
 	case statePasswordEntry:
 		switch msg.String() {
@@ -415,22 +434,108 @@ func (m model) connectionBar() string {
 	return result
 }
 
+// detailView renders a full-detail screen for m.selected.
+func (m model) detailView() string {
+	n := m.selected
+	var status string
+	switch {
+	case n.Connected:
+		status = connectedStyle.Render("connected")
+	case n.Known:
+		status = savedStyle.Render("saved")
+	default:
+		status = "not saved"
+	}
+
+	secured := "open"
+	if n.Secured {
+		secured = "yes"
+	}
+
+	ch := freqToChannel(n.Frequency)
+	chStr := "unknown"
+	if ch > 0 {
+		chStr = fmt.Sprintf("%d", ch)
+	}
+
+	freqStr := "unknown"
+	if n.Frequency > 0 {
+		freqStr = fmt.Sprintf("%d MHz", n.Frequency)
+	}
+
+	bssid := n.BSSID
+	if bssid == "" {
+		bssid = "unknown"
+	}
+
+	auth := n.AuthType
+	if auth == "" {
+		auth = "unknown"
+	}
+
+	lines := []string{
+		boldStyle.Render(n.SSID),
+		"",
+	}
+
+	// Radio
+	lines = append(lines, fmt.Sprintf("  %-14s %s  %d dBm  %s", "Signal:", signalBars(n.Signal), n.Signal, signalLabel(n.Signal)))
+	if n.Standard != "" {
+		lines = append(lines, fmt.Sprintf("  %-14s %s", "Standard:", n.Standard))
+	}
+	lines = append(lines, fmt.Sprintf("  %-14s %s  (%s)", "Frequency:", freqStr, freqToBand(n.Frequency)))
+	lines = append(lines, fmt.Sprintf("  %-14s %s", "Channel:", chStr))
+	if n.ChanWidth > 0 {
+		lines = append(lines, fmt.Sprintf("  %-14s %d MHz", "Chan Width:", n.ChanWidth))
+	}
+	if n.APCount > 0 {
+		lines = append(lines, fmt.Sprintf("  %-14s %d", "Access Points:", n.APCount))
+	}
+
+	lines = append(lines, "")
+
+	// Security
+	lines = append(lines, fmt.Sprintf("  %-14s %s", "Auth:", auth))
+	lines = append(lines, fmt.Sprintf("  %-14s %s", "Secured:", secured))
+	lines = append(lines, fmt.Sprintf("  %-14s %s", "BSSID:", bssid))
+
+	lines = append(lines, "")
+
+	// Connection
+	lines = append(lines, fmt.Sprintf("  %-14s %s", "Status:", status))
+	if n.Connected && m.connStatus.LinkSpeed != "" {
+		lines = append(lines, fmt.Sprintf("  %-14s %s", "Link Speed:", m.connStatus.LinkSpeed))
+	}
+
+	lines = append(lines,
+		"",
+		subtleStyle.Render("press any key to go back"),
+	)
+
+	out := ""
+	for _, l := range lines {
+		out += l + "\n"
+	}
+	return out
+}
+
 // buildRows converts a slice of Networks into table rows.
 func buildRows(networks []wifi.Network) []table.Row {
 	rows := make([]table.Row, len(networks))
 	for i, n := range networks {
-		// Status indicator column: ● connected, ○ saved, space otherwise.
+		// Status indicator column: plain ASCII only — lipgloss inside table
+		// cells breaks column width calculations.
 		var status string
 		switch {
 		case n.Connected:
-			status = connectedStyle.Render("●")
+			status = "*"
 		case n.Known:
-			status = savedStyle.Render("○")
+			status = "+"
 		default:
 			status = " "
 		}
 
-		// SSID with [connected]/[saved] suffix for screen-reader / no-colour clarity.
+		// SSID with [connected]/[saved] suffix for no-colour clarity.
 		ssid := n.SSID
 		if n.Connected {
 			ssid += " [connected]"
@@ -438,25 +543,80 @@ func buildRows(networks []wifi.Network) []table.Row {
 			ssid += " [saved]"
 		}
 
-		chStr := ""
-		if n.Frequency > 0 {
-			if ch := freqToChannel(n.Frequency); ch > 0 {
-				chStr = fmt.Sprintf("%d", ch)
-			}
-		}
 		rows[i] = table.Row{
 			status,
 			ssid,
 			signalBars(n.Signal),
 			fmt.Sprintf("%d dBm", n.Signal),
-			signalLabel(n.Signal),
 			freqToBand(n.Frequency),
-			chStr,
 			n.AuthType,
-			n.BSSID,
 		}
 	}
 	return rows
+}
+
+// rescanOverlayView renders the existing network list faded out with a
+// centred "Rescanning…" dialog stamped on top.
+func (m model) rescanOverlayView() string {
+	// Build the background: blurred table + connection bar + footer.
+	t := m.table
+	t.Blur()
+	connBar := m.connectionBar()
+	footer := subtleStyle.Render("↑/↓: navigate • enter: connect • i: info • r/space: rescan • q: quit")
+	bg := t.View() + "\n" + connBar + "\n" + footer
+
+	h, v := docStyle.GetFrameSize()
+	contentW := m.width - h
+	contentH := m.height - v
+
+	// Strip ANSI from every background line, pad to contentW, apply faint.
+	faint := lipgloss.NewStyle().Faint(true)
+	bgLines := strings.Split(bg, "\n")
+	for i, line := range bgLines {
+		plain := stripANSI(line)
+		vis := lipgloss.Width(plain)
+		if vis < contentW {
+			plain += strings.Repeat(" ", contentW-vis)
+		}
+		bgLines[i] = faint.Render(plain)
+	}
+	// Pad to fill the terminal vertically so the dialog always centres cleanly.
+	for len(bgLines) < contentH {
+		bgLines = append(bgLines, faint.Render(strings.Repeat(" ", contentW)))
+	}
+	if len(bgLines) > contentH {
+		bgLines = bgLines[:contentH]
+	}
+
+	// Render the dialog.
+	dialog := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 4).
+		Render(fmt.Sprintf("%s Rescanning…", m.spinner.View()))
+	dialogLines := strings.Split(dialog, "\n")
+	dialogH := len(dialogLines)
+	dialogW := lipgloss.Width(dialog)
+
+	// Centre position within the content area.
+	startRow := (contentH - dialogH) / 2
+	startCol := (contentW - dialogW) / 2
+	if startCol < 0 {
+		startCol = 0
+	}
+
+	// Stamp dialog lines over the faint background lines.
+	for i, dl := range dialogLines {
+		row := startRow + i
+		if row < 0 || row >= len(bgLines) {
+			continue
+		}
+		left := faint.Render(strings.Repeat(" ", startCol))
+		right := faint.Render(strings.Repeat(" ", max(0, contentW-startCol-dialogW)))
+		bgLines[row] = left + dl + right
+	}
+
+	return docStyle.Render(strings.Join(bgLines, "\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -469,12 +629,19 @@ func (m model) View() string {
 		return docStyle.Render(fmt.Sprintf("%s Detecting WiFi backend…", m.spinner.View()))
 
 	case stateScanning:
-		return docStyle.Render(fmt.Sprintf("%s Scanning for networks…", m.spinner.View()))
+		if len(m.networks) == 0 {
+			// Initial scan — no table data yet, just show the spinner.
+			return docStyle.Render(fmt.Sprintf("%s Scanning for networks…", m.spinner.View()))
+		}
+		return m.rescanOverlayView()
 
 	case stateList:
 		connBar := m.connectionBar()
-		footer := subtleStyle.Render("↑/↓: navigate • enter: connect • r: rescan • q: quit")
+		footer := subtleStyle.Render("↑/↓: navigate • enter: connect • i: info • r/space: rescan • q: quit")
 		return docStyle.Render(m.table.View() + "\n" + connBar + "\n" + footer)
+
+	case stateDetail:
+		return docStyle.Render(m.detailView())
 
 	case statePasswordEntry:
 		return docStyle.Render(fmt.Sprintf(

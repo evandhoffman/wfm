@@ -28,7 +28,7 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 
 	out, err := exec.Command(b.bin,
 		"--terse",
-		"--fields", "IN-USE,BSSID,SSID,SIGNAL,FREQ,SECURITY",
+		"--fields", "IN-USE,BSSID,SSID,SIGNAL,FREQ,SECURITY,CHAN-WIDTH",
 		"dev", "wifi", "list",
 	).Output()
 	if err != nil {
@@ -51,9 +51,9 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 		if line == "" {
 			continue
 		}
-		// Fields: IN-USE, BSSID, SSID, SIGNAL, FREQ, SECURITY
-		fields := splitTerse(line, 6)
-		if len(fields) < 6 {
+		// Fields: IN-USE, BSSID, SSID, SIGNAL, FREQ, SECURITY, CHAN-WIDTH
+		fields := splitTerse(line, 7)
+		if len(fields) < 7 {
 			slog.Debug("skipping malformed nmcli line", "line", line)
 			continue
 		}
@@ -71,8 +71,10 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 		security := strings.TrimSpace(fields[5])
 		authType := parseNmcliSecurity(security)
 		secured := authType != "Open"
+		chanWidth := parseNmcliChanWidth(fields[6])
 
 		if idx, exists := seen[ssid]; exists {
+			networks[idx].APCount++
 			// Prefer the active entry; otherwise keep strongest signal.
 			if inUse || signal > networks[idx].Signal {
 				networks[idx].Signal = signal
@@ -92,6 +94,8 @@ func (b *nmcliBackend) Scan() ([]Network, error) {
 			Secured:   secured,
 			Known:     known[ssid] || inUse,
 			Connected: inUse,
+			APCount:   1,
+			ChanWidth: chanWidth,
 		})
 	}
 	return networks, sc.Err()
@@ -154,6 +158,7 @@ func (b *nmcliBackend) Status() (ConnectionStatus, error) {
 			cs := ConnectionStatus{Connected: true, SSID: fields[1]}
 			if iface, err := b.wifiInterface(); err == nil {
 				cs.IPAddress, cs.Gateway, cs.DNS = ifaceNetInfo(iface)
+				cs.LinkSpeed = ifaceLinkSpeed(iface)
 			}
 			return cs, nil
 		}
@@ -266,6 +271,17 @@ func parseNmcliSecurity(s string) string {
 	default:
 		return s // WEP, OWE, etc. — pass through
 	}
+}
+
+// parseNmcliChanWidth parses nmcli's CHAN-WIDTH field ("20 MHz", "40 MHz", etc.)
+// and returns the integer MHz value.
+func parseNmcliChanWidth(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "--" {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.Fields(s)[0])
+	return n
 }
 
 // qualityToDBm converts nmcli's 0-100 signal-quality percentage to

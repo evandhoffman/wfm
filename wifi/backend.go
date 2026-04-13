@@ -13,6 +13,9 @@ type Network struct {
 	Secured   bool   // requires a passphrase (WPA2/WPA3-Personal)
 	Known     bool   // this system already has credentials stored for it
 	Connected bool   // currently the active connection
+	APCount   int    // number of distinct BSSIDs advertising this SSID; 0 if unknown
+	Standard  string // "WiFi 4", "WiFi 5", "WiFi 6", "WiFi 6E"; empty if unknown
+	ChanWidth int    // channel width in MHz (20, 40, 80, 160); 0 if unknown
 }
 
 // ConnectionStatus is the current state of the wireless interface.
@@ -22,6 +25,7 @@ type ConnectionStatus struct {
 	IPAddress string // CIDR, e.g. "192.168.1.100/24"; empty if no IPv4
 	Gateway   string // default gateway IPv4; empty if unknown
 	DNS       string // space-separated nameservers; empty if unknown
+	LinkSpeed string // negotiated TX bitrate, e.g. "866.7 MBit/s"; empty if unknown
 }
 
 // Backend is implemented by each WiFi subsystem (NetworkManager, iwd, …).
