@@ -166,6 +166,17 @@ func (b *nmcliBackend) Status() (ConnectionStatus, error) {
 	return ConnectionStatus{Connected: true}, nil
 }
 
+// Forget deletes the NM connection profile for ssid, which also disconnects
+// if that profile is currently active.
+func (b *nmcliBackend) Forget(ssid string) error {
+	out, err := exec.Command(b.bin, "--wait", "10", "connection", "delete", ssid).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nmcli connection delete %q: %w: %s", ssid, err, strings.TrimSpace(string(out)))
+	}
+	slog.Info("nmcli: forgot network", "ssid", ssid)
+	return nil
+}
+
 // knownSSIDs returns the set of SSIDs for which NM has saved credentials.
 // NM uses the connection name as the SSID by default; this is correct for
 // the common case. A D-Bus backend can do this more precisely if needed.

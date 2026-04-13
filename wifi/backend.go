@@ -46,6 +46,11 @@ type Backend interface {
 	// Disconnect drops the current connection on the WiFi interface.
 	Disconnect() error
 
+	// Forget removes all stored credentials for ssid so the network is
+	// treated as unknown on the next scan. If the network is currently
+	// connected the backend should disconnect first.
+	Forget(ssid string) error
+
 	// Status returns the current connection state of the WiFi interface.
 	Status() (ConnectionStatus, error)
 }

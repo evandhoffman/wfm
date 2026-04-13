@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -161,6 +162,26 @@ func (b *iwdBackend) Status() (ConnectionStatus, error) {
 		cs.LinkSpeed = ifaceLinkSpeed(iface)
 	}
 	return cs, nil
+}
+
+// Forget removes iwd credential files for ssid (.psk, .open, .8021x).
+// iwd picks up the deletion automatically; no daemon restart needed.
+func (b *iwdBackend) Forget(ssid string) error {
+	const dir = "/var/lib/iwd"
+	found := false
+	for _, ext := range []string{".psk", ".open", ".8021x"} {
+		path := filepath.Join(dir, ssid+ext)
+		if err := os.Remove(path); err == nil {
+			found = true
+			slog.Info("iwd: removed credential file", "path", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("iwd forget %q: %w", ssid, err)
+		}
+	}
+	if !found {
+		slog.Warn("iwd: no credential file found to forget", "ssid", ssid)
+	}
+	return nil
 }
 
 // knownSSIDs returns SSIDs for which iwd has stored credentials.

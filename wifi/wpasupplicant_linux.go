@@ -221,6 +221,28 @@ func (b *wpaBackend) knownSSIDs() (map[string]string, error) {
 	return known, sc.Err()
 }
 
+// Forget removes the network entry for ssid from wpa_supplicant and saves
+// the config. If the network is currently active it will be disconnected.
+func (b *wpaBackend) Forget(ssid string) error {
+	known, err := b.knownSSIDs()
+	if err != nil {
+		return fmt.Errorf("list networks: %w", err)
+	}
+	netID, ok := known[ssid]
+	if !ok {
+		slog.Warn("wpa_supplicant: network not found, nothing to forget", "ssid", ssid)
+		return nil
+	}
+	if out, err := b.cli("remove_network", netID); err != nil || strings.Contains(out, "FAIL") {
+		return fmt.Errorf("wpa_cli remove_network %s: %w (out: %s)", netID, err, out)
+	}
+	if out, err := b.cli("save_config"); err != nil || strings.Contains(out, "FAIL") {
+		slog.Warn("save_config failed after forget — change not persisted", "out", out, "err", err)
+	}
+	slog.Info("wpa_supplicant: forgot network", "ssid", ssid, "id", netID)
+	return nil
+}
+
 // waitConnected polls wpa_supplicant status until wpa_state=COMPLETED or
 // a 15-second timeout expires.
 func (b *wpaBackend) waitConnected() error {

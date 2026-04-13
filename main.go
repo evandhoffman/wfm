@@ -57,13 +57,14 @@ func stripANSI(s string) string { return ansiEscape.ReplaceAllString(s, "") }
 type appState int
 
 const (
-	stateStartup       appState = iota // detecting backend
-	stateScanning                      // running Scan()
-	stateList                          // showing network table
-	stateDetail                        // full info for one network
-	statePasswordEntry                 // prompting for WPA passphrase
-	stateConnecting                    // running Connect()
-	stateError                         // fatal error
+	stateStartup        appState = iota // detecting backend
+	stateScanning                       // running Scan()
+	stateList                           // showing network table
+	stateDetail                         // full info for one network
+	stateConfirmForget                  // "forget this network?" dialog
+	statePasswordEntry                  // prompting for WPA passphrase
+	stateConnecting                     // running Connect()
+	stateError                          // fatal error
 )
 
 // ---------------------------------------------------------------------------
@@ -181,7 +182,11 @@ type (
 		err      error
 	}
 	connectResultMsg struct{ err error }
-	logMsg           struct{ line string }
+	forgetResultMsg  struct {
+		ssid string
+		err  error
+	}
+	logMsg struct{ line string }
 )
 
 // ---------------------------------------------------------------------------
@@ -209,6 +214,13 @@ func connectCmd(b wifi.Backend, ssid, passphrase string) tea.Cmd {
 		// passphrase is intentionally not logged anywhere in this call chain
 		err := b.Connect(ssid, passphrase)
 		return connectResultMsg{err: err}
+	}
+}
+
+func forgetCmd(b wifi.Backend, ssid string) tea.Cmd {
+	return func() tea.Msg {
+		err := b.Forget(ssid)
+		return forgetResultMsg{ssid: ssid, err: err}
 	}
 }
 
@@ -335,6 +347,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Rescan so the table reflects the new connected state.
 		m.state = stateScanning
 		return m, tea.Batch(logCmd("connected to %q, rescanning…", m.selected.SSID), scanCmd(m.backend))
+
+	case forgetResultMsg:
+		if msg.err != nil {
+			slog.Error("forget failed", "ssid", msg.ssid, "err", msg.err)
+			m.state = stateError
+			m.err = fmt.Errorf("forget failed: %w", msg.err)
+			return m, logCmd("forget %q failed: %v", msg.ssid, msg.err)
+		}
+		m.state = stateScanning
+		return m, tea.Batch(logCmd("forgot %q, rescanning…", msg.ssid), scanCmd(m.backend))
 	}
 
 	return m.updateActiveComponent(msg)
@@ -357,6 +379,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.state = stateDetail
 			}
 			return m, nil
+		case "f":
+			cursor := m.table.Cursor()
+			if cursor >= 0 && cursor < len(m.networks) && m.networks[cursor].Known {
+				m.selected = m.networks[cursor]
+				m.state = stateConfirmForget
+			}
+			return m, nil
 		case "enter":
 			cursor := m.table.Cursor()
 			if cursor >= 0 && cursor < len(m.networks) {
@@ -366,6 +395,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case stateDetail:
 		m.state = stateList
+		return m, nil
+
+	case stateConfirmForget:
+		switch msg.String() {
+		case "y", "Y":
+			return m, tea.Batch(logCmd("forgetting %q…", m.selected.SSID), forgetCmd(m.backend, m.selected.SSID))
+		case "n", "N", "esc", "ctrl+c":
+			m.state = stateList
+			return m, nil
+		}
 		return m, nil
 
 	case statePasswordEntry:
