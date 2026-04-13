@@ -22,6 +22,13 @@ var (
 	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 	subtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	boldStyle   = lipgloss.NewStyle().Bold(true)
+
+	// Signal strength colours: green → yellow → orange → red.
+	sigVeryStrong = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // bright green
+	sigStrong     = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))  // lime
+	sigMedium     = lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
+	sigWeak       = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // orange
+	sigVeryWeak   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
 )
 
 // ---------------------------------------------------------------------------
@@ -60,7 +67,10 @@ func (i networkItem) Title() string {
 }
 
 func (i networkItem) Description() string {
-	return fmt.Sprintf("Signal: %s  %d dBm", signalBars(i.n.Signal), i.n.Signal)
+	style, label := signalMeta(i.n.Signal)
+	bars := style.Render(signalBars(i.n.Signal))
+	text := style.Render(label)
+	return fmt.Sprintf("%s  %d dBm  %s", bars, i.n.Signal, text)
 }
 
 func (i networkItem) FilterValue() string { return i.n.SSID }
@@ -78,6 +88,22 @@ func signalBars(dbm int) string {
 		return "█░░░"
 	default:
 		return "░░░░"
+	}
+}
+
+// signalMeta returns the lipgloss style and human label for a dBm signal value.
+func signalMeta(dbm int) (lipgloss.Style, string) {
+	switch {
+	case dbm >= -50:
+		return sigVeryStrong, "Very Strong"
+	case dbm >= -60:
+		return sigStrong, "Strong"
+	case dbm >= -70:
+		return sigMedium, "Medium"
+	case dbm >= -80:
+		return sigWeak, "Weak"
+	default:
+		return sigVeryWeak, "Very Weak"
 	}
 }
 
@@ -343,6 +369,11 @@ func (m model) View() string {
 // ---------------------------------------------------------------------------
 
 func main() {
+	if os.Getuid() != 0 {
+		fmt.Fprintln(os.Stderr, "wfm requires root privileges to manage WiFi.\nPlease re-run with: sudo wfm")
+		os.Exit(1)
+	}
+
 	// Log to a file so diagnostic output doesn't corrupt the TUI.
 	if f, err := os.OpenFile("/tmp/wfm.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{
